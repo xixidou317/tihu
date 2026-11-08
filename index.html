@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>鹈鹕骑自行车 · 单文件动画</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%23D6E1DD'/%3E%3Ccircle cx='44' cy='40' r='17' fill='%23FCF6E9'/%3E%3Cpath d='M58 36 L96 50 L58 54 Z' fill='%23EE9A3D'/%3E%3C/svg%3E">
+<style>
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: #D6E1DD;
+    overflow: hidden;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #scene { position: fixed; inset: 0; display: block; width: 100%; height: 100%; }
+  .hud {
+    position: fixed; left: 16px; bottom: 16px; z-index: 3;
+    display: flex; flex-wrap: wrap; gap: 8px;
+    pointer-events: none;
+  }
+  .tag {
+    font-size: 14px; line-height: 1;
+    color: #274048;
+    background: rgba(252, 246, 233, .76);
+    border: 1px solid rgba(39, 64, 72, .16);
+    border-radius: 999px;
+    padding: 9px 13px;
+    letter-spacing: .02em;
+  }
+  .tag b { font-weight: 600; font-variant-numeric: tabular-nums; }
+  @media (max-width: 520px) {
+    .hud { left: 12px; bottom: 12px; gap: 6px; }
+    .tag { font-size: 14px; padding: 8px 11px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="scene" role="img" aria-label="一只鹈鹕坐在自行车上，握着车把踩踏板向前骑行"></canvas>
+<div class="hud">
+  <div class="tag">速度 <b id="speedVal">1.0&times;</b></div>
+  <div class="tag" id="stateTag">点击暂停 · 滚轮调速</div>
+</div>
+<script>
+(function () {
+  'use strict';
+
+  var canvas = document.getElementById('scene');
+  if (!canvas || !canvas.getContext) { return; }
+  var ctx = canvas.getContext('2d');
+  if (!ctx) { return; }
+
+  var TAU = Math.PI * 2;
+  var DW = 1000, DH = 620;          /* 设计坐标系，所有图形按此绘制 */
+
+  /* ================= 配色 ================= */
+  var C = {
+    bg: '#D6E1DD',
+    road: '#C9C0AA',
+    roadEdge: '#B8AE96',
+    roadMark: '#DCD4C0',
+    shadow: '#B3A98F',
+    tire: '#3B3733',
+    rim: '#8C9AA0',
+    spoke: '#B7C2C3',
+    ink: '#274048',
+    ink2: '#4C646B',
+    cream: '#FCF6E9',
+    creamDark: '#E3D6BE',
+    creamLeg: '#F8F0DF',
+    legFar: '#DFD1B7',
+    bill: '#EE9A3D',
+    pouch: '#F6B875',
+    foot: '#E2872F',
+    footFar: '#C6782A',
+    scarf: '#D2634C',
+    scarfDark: '#BE5540'
+  };
+
+  /* ================= 几何基准 ================= */
+  var G = {
+    R: 88,                                   /* 车轮半径 */
+    ground: 500,
+    rear:  { x: 300, y: 412 },
+    front: { x: 700, y: 412 },
+    bb:    { x: 462, y: 438 },               /* 中轴 */
+    crank: 32,                               /* 曲柄长度 */
+    seatTop: { x: 398, y: 300 },
+    headTop: { x: 640, y: 292 },
+    headBot: { x: 660, y: 336 },
+    barTop:  { x: 642, y: 268 },
+    grip:    { x: 676, y: 268 },
+    hip:     { x: 386, y: 286 },
+    shoulder:{ x: 462, y: 212 },
+    headC:   { x: 556, y: 126 },
+    thigh: 108,
+    shin: 108
+  };
+
+  var state = {
+    dist: 0,      /* 累计“行驶距离”，所有相位都由它推导，保证动作彼此同步 */
+    speed: 1,     /* 速度倍率 0.2 ~ 3.0 */
+    paused: false,
+    last: 0
+  };
+
+  var dpr = 1, viewScale = 1, viewX = 0, viewY = 0;
+
+  /* ================= 画布尺寸 ================= */
+  function resize() {
+    var w = Math.max(1, window.innerWidth || DW);
+    var h = Math.max(1, window.innerHeight || DH);
+    dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
+
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+
+    viewScale = Math.min(w / DW, h / DH);
+    if (!isFinite(viewScale) || viewScale <= 0) { viewScale = 1; }
+    viewX = (w - DW * viewScale) / 2;
+    viewY = (h - DH * viewScale) / 2;
+  }
+
+  /* ================= 基础绘制工具 ================= */
+  function line(s, x1, y1, x2, y2, w, color) {
+    s.beginPath();
+    s.moveTo(x1, y1);
+    s.lineTo(x2, y2);
+    s.lineWidth = w;
+    s.strokeStyle = color;
+    s.lineCap = 'round';
+    s.lineJoin = 'round';
+    s.stroke();
+  }
+
+  function rrect(s, x, y, w, h, r) {
+    var rad = Math.min(r, w / 2, h / 2);
+    s.beginPath();
+    s.moveTo(x + rad, y);
+    s.lineTo(x + w - rad, y);
+    s.arcTo(x + w, y, x + w, y + rad, rad);
+    s.lineTo(x + w, y + h - rad);
+    s.arcTo(x + w, y + h, x + w - rad, y + h, rad);
+    s.lineTo(x + rad, y + h);
+    s.arcTo(x, y + h, x, y + h - rad, rad);
+    s.lineTo(x, y + rad);
+    s.arcTo(x, y, x + rad, y, rad);
+    s.closePath();
+  }
+
+  /* 两段骨骼 IK：给定髋与踝，求膝；膝盖恒定朝前，脚永远踩在踏板上，不会脱离 */
+  function solveLeg(hip, ankle, L1, L2) {
+    var dx = ankle.x - hip.x;
+    var dy = ankle.y - hip.y;
+    var raw = Math.sqrt(dx * dx + dy * dy);
+    if (!isFinite(raw) || raw < 1) { return { x: hip.x + 40, y: hip.y + 60 }; }
+
+    var ux = dx / raw, uy = dy / raw;
+    var d = Math.min(Math.max(raw, Math.abs(L1 - L2) + 2), L1 + L2 - 2);
+    var a = (d * d + L1 * L1 - L2 * L2) / (2 * d);
+    var hh = Math.sqrt(Math.max(0, L1 * L1 - a * a));
+    var px = hip.x + ux * a;
+    var py = hip.y + uy * a;
+    return { x: px + uy * hh, y: py - ux * hh };
+  }
+
+  /* ================= 车轮 ================= */
+  function drawWheel(s, cx, cy, ang) {
+    s.save();
+    s.translate(cx, cy);
+
+    s.beginPath();
+    s.arc(0, 0, G.R - 5, 0, TAU);
+    s.lineWidth = 10;
+    s.strokeStyle = C.tire;
+    s.stroke();
+
+    s.beginPath();
+    s.arc(0, 0, G.R - 13, 0, TAU);
+    s.lineWidth = 3;
+    s.strokeStyle = C.rim;
+    s.stroke();
+
+    s.save();
+    s.rotate(ang);
+    s.lineWidth = 2;
+    s.strokeStyle = C.spoke;
+    s.lineCap = 'round';
+    for (var i = 0; i < 16; i++) {
+      var a = i * TAU / 16;
+      s.beginPath();
+      s.moveTo(Math.cos(a) * 8, Math.sin(a) * 8);
+      s.lineTo(Math.cos(a) * (G.R - 16), Math.sin(a) * (G.R - 16));
+      s.stroke();
+    }
+    s.restore();
+
+    s.beginPath();
+    s.arc(0, 0, 10, 0, TAU);
+    s.fillStyle = C.rim;
+    s.fill();
+    s.beginPath();
+    s.arc(0, 0, 5, 0, TAU);
+    s.fillStyle = C.ink;
+    s.fill();
+
+    s.restore();
+  }
+
+  /* ================= 车架 / 座垫 / 车把 ================= */
+  function drawFrame(s) {
+    /* 后三角 */
+    line(s, G.bb.x, G.bb.y, G.rear.x, G.rear.y, 8, C.ink2);
+    line(s, G.rear.x, G.rear.y, G.seatTop.x, G.seatTop.y, 6, C.ink2);
+    /* 主三角 */
+    line(s, G.bb.x, G.bb.y, G.seatTop.x, G.seatTop.y, 9, C.ink);
+    line(s, G.seatTop.x, G.seatTop.y, G.headTop.x, G.headTop.y, 8, C.ink);
+    line(s, G.bb.x, G.bb.y, G.headBot.x, G.headBot.y, 9, C.ink);
+    line(s, G.headTop.x, G.headTop.y, G.headBot.x, G.headBot.y, 10, C.ink);
+
+    /* 前叉 */
+    s.beginPath();
+    s.moveTo(G.headBot.x, G.headBot.y);
+    s.quadraticCurveTo(G.headBot.x + 8, 380, G.front.x, G.front.y);
+    s.lineWidth = 7;
+    s.strokeStyle = C.ink;
+    s.lineCap = 'round';
+    s.stroke();
+
+    /* 座杆 + 座垫 */
+    line(s, G.seatTop.x, G.seatTop.y, G.seatTop.x - 8, G.seatTop.y - 14, 6, C.ink2);
+    s.beginPath();
+    s.ellipse(G.seatTop.x - 8, G.seatTop.y - 16, 30, 8.5, -0.05, 0, TAU);
+    s.fillStyle = C.ink;
+    s.fill();
+
+    /* 立管 + 车把 */
+    line(s, G.headTop.x, G.headTop.y, G.barTop.x, G.barTop.y, 6, C.ink2);
+    s.beginPath();
+    s.moveTo(G.barTop.x - 16, G.barTop.y + 8);
+    s.quadraticCurveTo(G.barTop.x + 2, G.barTop.y - 14, G.grip.x, G.grip.y - 2);
+    s.lineWidth = 6;
+    s.strokeStyle = C.ink;
+    s.stroke();
+
+    s.beginPath();
+    s.ellipse(G.grip.x + 2, G.grip.y - 1, 12, 7, 0.25, 0, TAU);
+    s.fillStyle = C.ink2;
+    s.fill();
+  }
+
+  /* ================= 链条 / 曲柄 / 踏板 ================= */
+  function drawChain(s, dist) {
+    s.save();
+    s.strokeStyle = C.ink2;
+    s.lineWidth = 2.5;
+    s.setLineDash([7, 5]);
+    var off = -(dist * 0.6) % 12;
+    s.lineDashOffset = isFinite(off) ? off : 0;
+    s.beginPath();
+    s.moveTo(G.bb.x, G.bb.y - 26);
+    s.lineTo(G.rear.x, G.rear.y - 15);
+    s.moveTo(G.bb.x, G.bb.y + 26);
+    s.lineTo(G.rear.x, G.rear.y + 15);
+    s.stroke();
+    s.restore();
+  }
+
+  function drawPedal(s, p) {
+    rrect(s, p.x - 15, p.y - 4, 30, 8, 3.5);
+    s.fillStyle = C.ink2;
+    s.fill();
+  }
+
+  function drawCrank(s, pedA, pedB, cAng) {
+    /* 牙盘（虚线圆环随曲柄转动，直观体现踩踏） */
+    s.save();
+    s.translate(G.bb.x, G.bb.y);
+    s.rotate(cAng);
+    s.beginPath();
+    s.arc(0, 0, 26, 0, TAU);
+    s.setLineDash([6, 5]);
+    s.lineWidth = 6;
+    s.strokeStyle = C.ink2;
+    s.stroke();
+    s.restore();
+
+    /* 远侧曲柄 + 踏板 */
+    line(s, G.bb.x, G.bb.y, pedB.x, pedB.y, 7, C.ink2);
+    drawPedal(s, pedB);
+    /* 近侧曲柄 + 踏板 */
+    line(s, G.bb.x, G.bb.y, pedA.x, pedA.y, 7, C.ink);
+    drawPedal(s, pedA);
+
+    s.beginPath();
+    s.arc(G.bb.x, G.bb.y, 7, 0, TAU);
+    s.fillStyle = C.ink;
+    s.fill();
+  }
+
+  /* ================= 腿与脚 ================= */
+  function drawLeg(s, hip, knee, ankle, thighCol, shinCol, wScale) {
+    var tw = 26 * wScale;
+    var sw = 16 * wScale;
+    s.lineCap = 'round';
+    s.lineJoin = 'round';
+
+    s.beginPath();
+    s.moveTo(hip.x, hip.y);
+    s.lineTo(knee.x, knee.y);
+    s.lineWidth = tw;
+    s.strokeStyle = thighCol;
+    s.stroke();
+
+    s.beginPath();
+    s.moveTo(knee.x, knee.y);
+    s.lineTo(ankle.x, ankle.y);
+    s.lineWidth = sw;
+    s.strokeStyle = shinCol;
+    s.stroke();
+
+    s.beginPath();
+    s.arc(knee.x, knee.y, 9 * wScale, 0, TAU);
+    s.fillStyle = thighCol;
+    s.fill();
+  }
+
+  function drawFoot(s, px, py, color) {
+    s.save();
+    s.translate(px, py);
+    s.beginPath();
+    s.moveTo(-14, 2);
+    s.quadraticCurveTo(-16, -10, 0, -11);
+    s.quadraticCurveTo(20, -12, 28, -2);
+    s.quadraticCurveTo(22, 3, 4, 3);
+    s.closePath();
+    s.fillStyle = color;
+    s.fill();
+    s.restore();
+  }
+
+  /* ================= 鹈鹕：身体 ================= */
+  function drawBody(s, bob) {
+    var cx = 430, cy = 242 + bob, rx = 78, ry = 56, rot = -0.28;
+
+    /* 尾羽（在身体之后，向后上方打开） */
+    s.fillStyle = C.creamDark;
+    for (var i = 0; i < 3; i++) {
+      var baseY = 256 + bob + i * 7;
+      s.beginPath();
+      s.moveTo(382, baseY);
+      s.quadraticCurveTo(340, 230 + bob + i * 13, 300, 212 + bob + i * 16);
+      s.quadraticCurveTo(342, 252 + bob + i * 10, 382, baseY + 20);
+      s.closePath();
+      s.fill();
+    }
+
+    /* 身体 */
+    s.save();
+    s.translate(cx, cy);
+    s.rotate(rot);
+    s.beginPath();
+    s.ellipse(0, 0, rx, ry, 0, 0, TAU);
+    s.fillStyle = C.cream;
+    s.fill();
+
+    /* 腹部暗面（裁剪在身体轮廓内，绝不会外溢） */
+    s.clip();
+    s.beginPath();
+    s.ellipse(0, 44, rx + 12, 34, 0, 0, TAU);
+    s.fillStyle = C.creamDark;
+    s.fill();
+    s.restore();
+
+    /* 胸部几笔羽毛线 */
+    s.save();
+    s.translate(cx, cy);
+    s.rotate(rot);
+    s.strokeStyle = '#EFE2CA';
+    s.lineWidth = 3;
+    s.lineCap = 'round';
+    for (var k = 0; k < 3; k++) {
+      s.beginPath();
+      s.moveTo(-26 + k * 6, -18 + k * 16);
+      s.quadraticCurveTo(-6 + k * 6, -14 + k * 16, 12 + k * 5, -18 + k * 16);
+      s.stroke();
+    }
+    s.restore();
+  }
+
+  /* ================= 鹈鹕：翅膀（握把处固定，肩部随身体起伏） ================= */
+  function drawWing(s, bob) {
+    var sx = G.shoulder.x;
+    var sy = G.shoulder.y + bob;
+    var gx = G.grip.x - 4;
+    var gy = G.grip.y + 4;
+
+    s.beginPath();
+    s.moveTo(sx - 10, sy - 30);
+    s.bezierCurveTo(sx + 46, sy - 30, gx - 86, gy - 62, gx - 6, gy - 22);
+    s.bezierCurveTo(gx + 8, gy - 16, gx + 10, gy - 4, gx - 6, gy + 6);
+    s.bezierCurveTo(gx - 64, gy - 6, sx + 46, sy + 40, sx - 12, sy + 26);
+    s.closePath();
+    s.fillStyle = C.cream;
+    s.fill();
+    s.strokeStyle = C.creamDark;
+    s.lineWidth = 2;
+    s.stroke();
+
+    /* 翅尖羽毛线 */
+    s.strokeStyle = C.creamDark;
+    s.lineWidth = 2.5;
+    s.lineCap = 'round';
+    for (var i = 0; i < 3; i++) {
+      var px = gx - 26 - i * 26;
+      var py = gy - 8 - i * 7;
+      s.beginPath();
+      s.moveTo(px, py);
+      s.quadraticCurveTo(px - 8, py + 12, px - 20, py + 17);
+      s.stroke();
+    }
+
+    /* 抓住车把的“手” */
+    s.beginPath();
+    s.ellipse(gx - 2, gy + 4, 11, 7, 0.2, 0, TAU);
+    s.fillStyle = C.foot;
+    s.fill();
+  }
+
+  /* ================= 鹈鹕：脖子 / 头 / 大嘴 / 围巾 ================= */
+  function drawNeckHead(s, bob, wave) {
+    var nodeY = bob * 1.2;
+    var hx = G.headC.x;
+    var hy = G.headC.y + bob * 1.4;
+
+    /* 脖子（S 形曲线） */
+    s.beginPath();
+    s.moveTo(472, 208 + bob);
+    s.bezierCurveTo(464, 176 + nodeY, 496, 148 + nodeY, 548, 136 + nodeY);
+    s.lineWidth = 17;
+    s.strokeStyle = C.cream;
+    s.lineCap = 'round';
+    s.stroke();
+
+    /* 喉囊（先画，再压嘴部） */
+    s.beginPath();
+    s.moveTo(hx + 14, hy + 2);
+    s.quadraticCurveTo(hx + 56, hy + 78, hx + 128, hy + 26);
+    s.quadraticCurveTo(hx + 128, hy + 18, hx + 138, hy + 14);
+    s.lineTo(hx + 14, hy + 2);
+    s.closePath();
+    s.fillStyle = C.pouch;
+    s.fill();
+
+    /* 头 */
+    s.beginPath();
+    s.arc(hx, hy, 21, 0, TAU);
+    s.fillStyle = C.cream;
+    s.fill();
+
+    /* 脑后小冠羽 */
+    s.beginPath();
+    s.moveTo(hx - 12, hy - 16);
+    s.quadraticCurveTo(hx - 22, hy - 28, hx - 31, hy - 18);
+    s.quadraticCurveTo(hx - 23, hy - 11, hx - 15, hy - 7);
+    s.closePath();
+    s.fillStyle = C.creamDark;
+    s.fill();
+
+    /* 上喙 */
+    s.beginPath();
+    s.moveTo(hx + 10, hy - 10);
+    s.quadraticCurveTo(hx + 78, hy - 4, hx + 140, hy + 12);
+    s.quadraticCurveTo(hx + 132, hy + 21, hx + 118, hy + 21);
+    s.quadraticCurveTo(hx + 68, hy + 8, hx + 10, hy + 4);
+    s.closePath();
+    s.fillStyle = C.bill;
+    s.fill();
+
+    /* 眼睛 */
+    s.beginPath();
+    s.arc(hx - 2, hy - 9, 4, 0, TAU);
+    s.fillStyle = C.ink;
+    s.fill();
+    s.beginPath();
+    s.arc(hx - 0.6, hy - 10.4, 1.4, 0, TAU);
+    s.fillStyle = '#FFFFFF';
+    s.fill();
+
+    /* 小围巾：结在脖根，两条飘带随速度轻摆 */
+    var sway = wave * 7;
+    s.beginPath();
+    s.ellipse(484, 180 + bob, 13, 10, 0.15, 0, TAU);
+    s.fillStyle = C.scarf;
+    s.fill();
+
+    s.beginPath();
+    s.moveTo(478, 178 + bob);
+    s.quadraticCurveTo(444, 160 + bob + sway, 408, 168 + bob + sway * 1.3);
+    s.quadraticCurveTo(442, 180 + bob - sway * 0.3, 472, 190 + bob);
+    s.closePath();
+    s.fillStyle = C.scarfDark;
+    s.fill();
+
+    s.beginPath();
+    s.moveTo(482, 186 + bob);
+    s.quadraticCurveTo(452, 186 + bob - sway * 0.8, 424, 204 + bob + sway * 0.5);
+    s.quadraticCurveTo(452, 200 + bob, 486, 196 + bob);
+    s.closePath();
+    s.fillStyle = C.scarf;
+    s.fill();
+  }
+
+  /* ================= 主场景 ================= */
+  function drawScene(s) {
+    var dist = state.dist;
+    var wAng = (dist / G.R) % TAU;               /* 车轮相位 */
+    var cAng = (dist / (G.R * 1.9)) % TAU;       /* 曲柄相位 */
+    var bob = Math.sin(cAng * 2) * 3.4;          /* 身体起伏：每圈踩踏两次 */
+    var wave = Math.sin(dist * 0.03);            /* 围巾飘动 */
+
+    /* 背景 */
+    s.fillStyle = C.bg;
+    s.fillRect(-2000, -2000, 7000, 5000);
+
+    /* 地面 */
+    s.fillStyle = C.road;
+    s.fillRect(-2000, G.ground, 7000, 1200);
+    s.strokeStyle = C.roadEdge;
+    s.lineWidth = 4;
+    s.beginPath();
+    s.moveTo(-2000, G.ground);
+    s.lineTo(5000, G.ground);
+    s.stroke();
+
+    /* 路面标线随速度滚动 */
+    var off = dist % 150;
+    s.fillStyle = C.roadMark;
+    for (var i = -3; i < 12; i++) {
+      var rx = -200 + i * 150 - off;
+      rrect(s, rx, 536, 56, 7, 3.5);
+      s.fill();
+      rrect(s, rx + 96, 574, 26, 5, 2.5);
+      s.fill();
+    }
+
+    /* 速度线（速度越快越明显，始终画在最底层） */
+    var windAlpha = Math.max(0, Math.min(0.15, (state.speed - 1) * 0.11));
+    if (windAlpha > 0.006) {
+      s.strokeStyle = 'rgba(90, 108, 104,' + windAlpha.toFixed(3) + ')';
+      s.lineWidth = 3;
+      s.lineCap = 'round';
+      for (var k = 0; k < 5; k++) {
+        var x = 940 - ((dist * 0.75 + k * 240) % 1400);
+        var y = 176 + (k % 3) * 62;
+        var len = 58 + (k % 2) * 32;
+        s.beginPath();
+        s.moveTo(x, y);
+        s.lineTo(x - len, y);
+        s.stroke();
+      }
+    }
+
+    /* 影子 */
+    s.fillStyle = C.shadow;
+    s.beginPath();
+    s.ellipse(500, G.ground + 4, 305, 15, 0, 0, TAU);
+    s.fill();
+
+    /* 车轮 */
+    drawWheel(s, G.rear.x, G.rear.y, wAng);
+    drawWheel(s, G.front.x, G.front.y, wAng);
+
+    /* 踏板位置 */
+    var pedA = { x: G.bb.x + Math.cos(cAng) * G.crank, y: G.bb.y + Math.sin(cAng) * G.crank };
+    var pedB = { x: G.bb.x - Math.cos(cAng) * G.crank, y: G.bb.y - Math.sin(cAng) * G.crank };
+    var hip = { x: G.hip.x, y: G.hip.y + bob };
+    var ankA = { x: pedA.x - 3, y: pedA.y - 18 };
+    var ankB = { x: pedB.x - 3, y: pedB.y - 18 };
+
+    /* 远侧腿（在车架之后） */
+    var kneeB = solveLeg(hip, ankB, G.thigh, G.shin);
+    drawLeg(s, hip, kneeB, ankB, C.legFar, C.legFar, 0.88);
+    drawFoot(s, pedB.x, pedB.y, C.footFar);
+
+    /* 车架 */
+    drawFrame(s);
+    drawChain(s, dist);
+    drawCrank(s, pedA, pedB, cAng);
+
+    /* 近侧腿 */
+    var kneeA = solveLeg(hip, ankA, G.thigh, G.shin);
+    drawLeg(s, hip, kneeA, ankA, C.creamLeg, C.cream, 1);
+    drawFoot(s, pedA.x, pedA.y, C.foot);
+
+    /* 鹈鹕 */
+    drawBody(s, bob);
+    drawWing(s, bob);
+    drawNeckHead(s, bob, wave);
+  }
+
+  /* ================= 渲染 ================= */
+  function render() {
+    var w = canvas.width / dpr;
+    var h = canvas.height / dpr;
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = C.bg;
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.save();
+    ctx.translate(viewX, viewY);
+    ctx.scale(viewScale, viewScale);
+    drawScene(ctx);
+    ctx.restore();
+  }
+
+  /* ================= 循环 ================= */
+  function tick(now) {
+    window.requestAnimationFrame(tick);
+    try {
+      var t = (typeof now === 'number' && isFinite(now)) ? now : Date.now();
+      if (!state.last) { state.last = t; }
+      var dt = (t - state.last) / 1000;
+      state.last = t;
+      if (!isFinite(dt) || dt < 0) { dt = 0; }
+      if (dt > 0.05) { dt = 0.05; }          /* 单帧最大步长，切后台回来不会“跳帧” */
+
+      if (!state.paused) {
+        state.dist += dt * 300 * state.speed;
+        if (!isFinite(state.dist)) { state.dist = 0; }
+        if (state.dist > 1e7) { state.dist = state.dist % 1e6; }
+      }
+      render();
+    } catch (err) {
+      /* 单帧异常不打断动画 */
+    }
+  }
+
+  /* ================= 交互 ================= */
+  var MIN_SPEED = 0.2;
+  var MAX_SPEED = 3.0;
+
+  function setSpeed(v) {
+    if (!isFinite(v)) { return; }
+    state.speed = Math.min(MAX_SPEED, Math.max(MIN_SPEED, v));
+    updateHud();
+  }
+
+  function updateHud() {
+    try {
+      var sv = document.getElementById('speedVal');
+      var st = document.getElementById('stateTag');
+      if (sv) { sv.textContent = state.speed.toFixed(1) + '\u00d7'; }
+      if (st) { st.textContent = state.paused ? '已暂停 · 点击继续' : '点击暂停 · 滚轮调速'; }
+    } catch (e) { }
+  }
+
+  /* 交互 1：点击切换暂停 / 继续 */
+  window.addEventListener('click', function () {
+    state.paused = !state.paused;
+    updateHud();
+  }, false);
+
+  /* 交互 2：滚轮调速（向上提速、向下降速，限速防卡死） */
+  function onWheel(e) {
+    if (e && e.cancelable) { e.preventDefault(); }
+    var d = e ? e.deltaY : 0;
+    if (typeof d !== 'number' || !isFinite(d) || d === 0) { return; }
+    setSpeed(state.speed + (d > 0 ? -0.15 : 0.15));
+  }
+  try {
+    window.addEventListener('wheel', onWheel, { passive: false });
+  } catch (err) {
+    window.addEventListener('wheel', onWheel, false);
+  }
+
+  /* 键盘等价操作（便于无滚轮设备） */
+  window.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.code === 'Space') {
+      e.preventDefault();
+      state.paused = !state.paused;
+      updateHud();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setSpeed(state.speed + 0.15);
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setSpeed(state.speed - 0.15);
+    }
+  }, false);
+
+  /* ================= 启动 ================= */
+  try {
+    resize();
+    updateHud();
+    window.addEventListener('resize', resize, false);
+    window.addEventListener('orientationchange', resize, false);
+    window.requestAnimationFrame(tick);
+  } catch (err) {
+    /* 极端环境下静默失败，不抛出错误打断页面 */
+  }
+})();
+</script>
+</body>
+</html>
